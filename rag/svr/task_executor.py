@@ -390,6 +390,34 @@ def main():
             callback(1., "Done!")
             DocumentService.increment_chunk_num(r["doc_id"], r["kb_id"], tk_count, chunk_count, 0)
             cron_logger.info("Chunk doc({}), token({}), chunks({}), elapsed:{:.2f}".format(r["id"], tk_count, len(cks), timer() - st))
+            
+            # IER extraction for document after successful processing
+            try:
+                from api.db.services.ier_indexing import extract_and_index_ier
+                
+                # Extract content chunks for IER analysis
+                content_chunks = [c.get("content_with_weight", "") for c in cks if c.get("content_with_weight")]
+                
+                if content_chunks:
+                    ier_success = extract_and_index_ier(
+                        document_id=r["doc_id"],
+                        kb_id=r["kb_id"], 
+                        content_chunks=content_chunks,
+                        tenant_id=r["tenant_id"],
+                        chat_model=r.get("llm_id")  # Use tenant's default chat model
+                    )
+                    
+                    if ier_success:
+                        cron_logger.info(f"IER extraction and indexing completed for document {r['doc_id']}")
+                    else:
+                        cron_logger.warning(f"IER extraction and indexing failed for document {r['doc_id']}")
+                else:
+                    cron_logger.warning(f"No content available for IER extraction for document {r['doc_id']}")
+                    
+            except Exception as e:
+                # IER extraction failure should not stop document processing
+                cron_logger.error(f"IER extraction error for document {r['doc_id']}: {str(e)}")
+                traceback.print_exc()
 
             try:
                 print("clean cache")

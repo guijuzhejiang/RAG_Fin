@@ -981,6 +981,36 @@ class CanvasTemplate(DataBaseModel):
         db_table = "canvas_template"
 
 
+class IerDocument(DataBaseModel):
+    id = CharField(max_length=32, primary_key=True)
+    document_id = CharField(max_length=32, null=False, help_text="Reference to document table", index=True)
+    kb_id = CharField(max_length=256, null=False, help_text="Reference to knowledgebase", index=True)
+    
+    # IER fields (Industry, Geography, Summary) 
+    industry = CharField(max_length=255, null=True, help_text="Industry classification", index=True)
+    geography = CharField(max_length=255, null=True, help_text="Geographic location/region", index=True)
+    summary = LongTextField(null=True, help_text="Document summary")
+    
+    # Extraction metadata
+    extraction_method = CharField(max_length=64, null=True, help_text="Method used for extraction", default="llm", index=True)
+    extraction_model = CharField(max_length=128, null=True, help_text="Model used for extraction", index=True)
+    extraction_confidence = FloatField(default=0.0, help_text="Confidence score for extraction")
+    extraction_time = DateTimeField(null=True, help_text="When extraction was performed", index=True)
+    
+    # Additional structured data
+    metadata = JSONField(null=True, default={}, help_text="Additional extraction metadata")
+    
+    status = CharField(
+        max_length=1,
+        null=True,
+        help_text="is it validate(0: wasted，1: validate)",
+        default="1",
+        index=True)
+
+    class Meta:
+        db_table = "ier_document"
+
+
 def migrate_db():
     with DB.transaction():
         migrator = DatabaseMigrator[DATABASE_TYPE.upper()].value(DB)

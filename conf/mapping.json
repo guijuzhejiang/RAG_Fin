@@ -210,6 +210,57 @@
             }
         },
         {
+            "industry": {
+              "match": "*_industry",
+              "mapping": {
+                "type": "keyword",
+                "similarity": "boolean",
+                "store": true,
+                "fields": {
+                  "analyzed": {
+                    "type": "text",
+                    "analyzer": "whitespace",
+                    "store": true
+                  }
+                }
+              }
+            }
+        },
+        {
+            "geography": {
+              "match": "*_geography",
+              "mapping": {
+                "type": "keyword", 
+                "similarity": "boolean",
+                "store": true,
+                "fields": {
+                  "analyzed": {
+                    "type": "text",
+                    "analyzer": "whitespace",
+                    "store": true
+                  }
+                }
+              }
+            }
+        },
+        {
+            "summary": {
+              "match": "*_summary",
+              "mapping": {
+                "type": "text",
+                "similarity": "scripted_sim",
+                "analyzer": "whitespace",
+                "store": true,
+                "fields": {
+                  "keyword": {
+                    "type": "keyword",
+                    "store": true
+                  }
+                }
+              }
+            }
+        },
+        {
             "binary": {
               "match": "*_bin",
               "mapping": {
