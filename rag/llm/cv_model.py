@@ -25,7 +25,7 @@ import base64
 from io import BytesIO
 import json
 import requests
-
+import gc
 from rag.nlp import is_english
 from api.utils import get_uuid
 from api.utils.file_utils import get_project_base_directory
@@ -101,7 +101,7 @@ class Base(ABC):
         
         buffered = BytesIO()
         # 直接用PNG（支持所有格式包括RGBA）
-        image.save(buffered, format="PNG")
+        image.save(buffered, format="JPEG")
         return base64.b64encode(buffered.getvalue()).decode("utf-8")
 
     def prompt(self, b64):
@@ -399,13 +399,20 @@ class OllamaCV(Base):
 
     def describe(self,
                  image,
+                 context: str = '',
                  num_predict: int = 512,
                  temperature: float = 0.6,
                  top_p: float = 0.9,
                  top_k: int = 40,
                  repeat_penalty: float = 1.1):
         # b64 = self.image2base64(image)
-        prompt = '''You are analyzing an image that may contain charts, graphs, infographics, tables, maps, or other visual representations. Your task is to provide an accurate, concise, and RAG-ready description focused on factual content suitable for a knowledge base.
+        prompt_template = '''You are analyzing an image that may contain charts, graphs, infographics, tables, maps, or other visual representations. Your task is to provide an accurate, concise, and RAG-ready description focused on factual content suitable for a knowledge base.
+
+CONTEXT INTEGRATION:
+1. You have been provided with context from the PDF document: {context}
+2. FIRST, evaluate whether this context is relevant to the image content. 
+3. If the context is RELEVANT, integrate meaningful information from it to enhance your analysis
+4. If the context is IRRELEVANT, prioritize the actual image content and ignore the context
 
 SPECIFIC INSTRUCTIONS:
 1. CAREFULLY EXAMINE THE IMAGE CONTENT:
@@ -414,13 +421,14 @@ SPECIFIC INSTRUCTIONS:
 
 2. FOR FINANCIAL/BUSINESS IMAGES (charts, graphs, tables):
    - First identify x-axis and y-axis meaning (e.g., x = year, y = monetary value). If y-axis ticks and unit are visible (e.g., "HK$M" and tick labels), include the unit in all reported values.
-   - For each x-tick (each year's bar/point), output one structured record with fields: year, total_value, total_unit, value_type, legibility, confidence.
-        Example: {"year":2015, "total_value":60000, "total_unit":"HK$M", "value_type":"measured"|"estimated", "legibility":"all readable"|"some illegible", "confidence":0.92}
-   - If the chart is stacked, attempt to extract values per legend item. If numeric labels are not present, perform linear interpolation between visible y-axis ticks and mark such values as "estimated".
+   - If the chart is stacked, attempt to extract values per legend item. If numeric labels are not present, perform linear interpolation between visible y-axis ticks.
    - Focus on numerical data: exact numbers, percentages, monetary values, dates and units.
    - Identify and report key financial/business metrics (revenue, profit, growth rates, market share, KPIs) only if clearly visible.
    - Highlight trends, comparisons, and significant changes using concise bullets.
    - Always report time periods, measurement units, and currency types when present.
+   - For charts that use a legend (e.g., stacked bars or colored segments), map legend entries to visual segments by matching legend labels to visual indicators (prefer pixel/colour sampling, e.g., RGB/HEX) rather than vague color names. Use that mapping to assign each visible segment to a label/region.
+   - If numeric labels are present on bars/segments/points, treat those as "measured". If numeric labels are absent but axis ticks and units are readable, convert pixel heights/positions to data values via linear interpolation between visible ticks.
+   - Output format guidance: produce a machine-readable structured output (JSON or equivalent) with one record per x-tick. 
 
 3. FOR NON-BUSINESS IMAGES (maps, diagrams, general visuals):
    - Provide a factual, concise description of the depicted elements and relationships.
@@ -444,6 +452,10 @@ SPECIFIC INSTRUCTIONS:
 
 PRIMARY GOAL: produce a compact, factual, non-decorative description optimized for RAG ingestion — prioritize numbers and explicit claims; otherwise summarize clearly stated relationships without inventing details.
 '''
+        
+        # 使用 format 方法将 context 参数插入 prompt 模板
+        prompt = prompt_template.format(context=context)
+        
         try:
             options = {
                 # "num_predict": num_predict,
@@ -457,7 +469,7 @@ PRIMARY GOAL: produce a compact, factual, non-decorative description optimized f
             if isinstance(image, Image.Image):  # PIL Image对象
                 from io import BytesIO
                 buffer = BytesIO()
-                image.save(buffer, format='PNG')
+                image.save(buffer, format='JPEG')
                 image_data = buffer.getvalue()
             elif isinstance(image, bytes):
                 image_data = image
@@ -537,75 +549,96 @@ PRIMARY GOAL: produce a compact, factual, non-decorative description optimized f
 
 class llamaCPPCV(Base):
     def __init__(self, key, model_name, lang="English", **kwargs):
-        clip_model_path = '/media/zzg/GJ_disk01/pretrained_model/unsloth/gemma-3-12b-it-GGUF/mmproj-BF16.gguf'
-        model_path = '/media/zzg/GJ_disk01/pretrained_model/unsloth/gemma-3-12b-it-GGUF/gemma-3-12b-it-Q5_K_M.gguf'
+        model_path = '/media/zzg/GJ_disk01/pretrained_model/bartowski/OpenGVLab_InternVL3_5-14B-GGUF/OpenGVLab_InternVL3_5-14B-Q5_K_M.gguf'
+        clip_model_path = '/media/zzg/GJ_disk01/pretrained_model/bartowski/OpenGVLab_InternVL3_5-14B-GGUF/mmproj-OpenGVLab_InternVL3_5-14B-bf16.gguf'
         chat_handler = Llava15ChatHandler(clip_model_path=clip_model_path)
         self.model = Llama(
             model_path=model_path,
             chat_handler=chat_handler,
-            n_ctx=4096,
+            n_ctx=2048,
             n_gpu_layers=-1,  # 所有模型层都尝试放到 GPU
             n_batch=256,
-            verbose=True,
+            verbose=False,
             n_threads=8,  # CPU線程數
         )
+
+    def _preprocess_image_bytes(self, image, max_side=1024, quality=80):
+        if isinstance(image, Image.Image):
+            w,h = image.size
+            scale = min(1.0, max_side / max(w,h))
+            if scale < 1.0:
+                image = image.resize((int(w*scale), int(h*scale)), Image.LANCZOS)
+            buf = BytesIO()
+            image.save(buf, format='JPEG', quality=quality)
+            return base64.b64encode(buf.getvalue()).decode()
+        else:
+            return image  # already bytes/base64
+
+    def _build_prompt(self, context):
+        prompt_template = '''You are analyzing an image that may contain charts, graphs, infographics, tables, maps, or other visual representations. 
+        Your task is to provide an accurate, concise, and RAG-ready description focused on factual content suitable for a knowledge base.
+
+        CONTEXT INTEGRATION:
+        1. You have been provided with context from the PDF document: {context}
+        2. FIRST, evaluate whether this context is relevant to the image content. 
+        3. If the context is RELEVANT, integrate meaningful information from it to enhance your analysis
+        4. If the context is IRRELEVANT, prioritize the actual image content and ignore the context
+
+        SPECIFIC INSTRUCTIONS:
+        1. CAREFULLY EXAMINE THE IMAGE CONTENT:
+           - First determine the image type (financial chart, business graph, map, diagram, table, or other)
+           - Adapt your analysis approach based on the image type
+
+        2. FOR FINANCIAL/BUSINESS IMAGES (charts, graphs, tables):
+           - First identify x-axis and y-axis meaning (e.g., x = year, y = monetary value). If y-axis ticks and unit are visible (e.g., "HK$M" and tick labels), include the unit in all reported values.
+           - If the chart is stacked, attempt to extract values per legend item. If numeric labels are not present, perform linear interpolation between visible y-axis ticks and mark such values as "estimated".
+           - Focus on numerical data: exact numbers, percentages, monetary values, dates and units.
+           - Identify and report key financial/business metrics (revenue, profit, growth rates, market share, KPIs) only if clearly visible.
+           - Highlight trends, comparisons, and significant changes using concise bullets.
+           - Always report time periods, measurement units, and currency types when present.
+           - For charts that use a legend (e.g., stacked bars or colored segments), map legend entries to visual segments by matching legend labels to visual indicators (prefer pixel/colour sampling, e.g., RGB/HEX) rather than vague color names. Use that mapping to assign each visible segment to a label/region.
+           - If numeric labels are present on bars/segments/points, treat those as "measured". If numeric labels are absent but axis ticks and units are readable, convert pixel heights/positions to data values via linear interpolation between visible ticks.
+
+        3. FOR NON-BUSINESS IMAGES (maps, diagrams, general visuals):
+           - Provide a factual, concise description of the depicted elements and relationships.
+           - Extract any visible text, labels, or numbers.
+           - Report spatial or causal relationships if clearly shown.
+           - Do not force a financial/business interpretation.
+
+        4. DATA EXTRACTION PRINCIPLES:
+           - Do not invent, assume, or extrapolate information that is not visibly present.
+           - Report only clearly visible and readable information
+           - Do not include decorative/visual attributes (color, shape, font, layout) unless they convey real data (e.g., legend mapping color → value). Descriptions like “blue oval” or “green box” are unnecessary for the knowledge base and must be omitted.
+
+        5. OUTPUT FORMAT (RAG-FRIENDLY):
+           - Produce a short, factual summary suitable for ingestion into a knowledge base.
+           - Each bullet must be a single factual statement (no narrative fluff)
+           - For data-rich images: use bullet points for key findings
+           - Always maintain factual accuracy over speculative interpretation
+
+        6. QUALITY CONTROL:
+           - If the image is decorative or purely artistic without data, give one brief factual sentence (no numeric analysis).
+
+        PRIMARY GOAL: produce a compact, factual, non-decorative description optimized for RAG ingestion — prioritize numbers and explicit claims; otherwise summarize clearly stated relationships without inventing details.
+        '''
+
+        # 使用 format 方法将 context 参数插入 prompt 模板
+        prompt = prompt_template.format(context=context)
+        return prompt
+
     def describe(self,
                  image,
+                 context: str = '',
                  num_predict: int = 512,
                  temperature: float = 0.1,
                  top_p: float = 0.8,
                  top_k: int = 40,
                  repeat_penalty: float = 1.1):
         # b64 = self.image2base64(image)
-        prompt = '''You are analyzing an image that may contain charts, graphs, infographics, tables, maps, or other visual representations. Your task is to provide an accurate, concise, and RAG-ready description focused on factual content suitable for a knowledge base.
-
-SPECIFIC INSTRUCTIONS:
-1. CAREFULLY EXAMINE THE IMAGE CONTENT:
-   - First determine the image type (financial chart, business graph, map, diagram, table, or other)
-   - Adapt your analysis approach based on the image type
-
-2. FOR FINANCIAL/BUSINESS IMAGES (charts, graphs, tables):
-   - First identify x-axis and y-axis meaning (e.g., x = year, y = monetary value). If y-axis ticks and unit are visible (e.g., "HK$M" and tick labels), include the unit in all reported values.
-   - For each x-tick (each year's bar/point), output one structured record with fields: year, total_value, total_unit, value_type, legibility, confidence.
-        Example: {"year":2015, "total_value":60000, "total_unit":"HK$M", "value_type":"measured"|"estimated", "legibility":"all readable"|"some illegible", "confidence":0.92}
-   - If the chart is stacked, attempt to extract values per legend item. If numeric labels are not present, perform linear interpolation between visible y-axis ticks and mark such values as "estimated".
-   - Focus on numerical data: exact numbers, percentages, monetary values, dates and units.
-   - Identify and report key financial/business metrics (revenue, profit, growth rates, market share, KPIs) only if clearly visible.
-   - Highlight trends, comparisons, and significant changes using concise bullets.
-   - Always report time periods, measurement units, and currency types when present.
-
-3. FOR NON-BUSINESS IMAGES (maps, diagrams, general visuals):
-   - Provide a factual, concise description of the depicted elements and relationships.
-   - Extract any visible text, labels, or numbers.
-   - Report spatial or causal relationships if clearly shown.
-   - Do not force a financial/business interpretation.
-
-4. DATA EXTRACTION PRINCIPLES:
-   - Do not invent, assume, or extrapolate information that is not visibly present.
-   - Report only clearly visible and readable information
-   - Do not include decorative/visual attributes (color, shape, font, layout) unless they convey real data (e.g., legend mapping color → value). Descriptions like “blue oval” or “green box” are unnecessary for the knowledge base and must be omitted.
-
-5. OUTPUT FORMAT (RAG-FRIENDLY):
-   - Produce a short, factual summary suitable for ingestion into a knowledge base.
-   - Each bullet must be a single factual statement (no narrative fluff)
-   - For data-rich images: use bullet points for key findings
-   - Always maintain factual accuracy over speculative interpretation
-
-6. QUALITY CONTROL:
-   - If the image is decorative or purely artistic without data, give one brief factual sentence (no numeric analysis).
-
-PRIMARY GOAL: produce a compact, factual, non-decorative description optimized for RAG ingestion — prioritize numbers and explicit claims; otherwise summarize clearly stated relationships without inventing details.
-'''
+        prompt = self._build_prompt(context)
         try:
             # 将PIL Image对象转换为Ollama期望的格式（bytes）
-            if isinstance(image, Image.Image):  # PIL Image对象
-                from io import BytesIO
-                buffer = BytesIO()
-                image.save(buffer, format='PNG')
-                img_base64 = base64.b64encode(buffer.getvalue()).decode()
-            else:
-                # 其他格式，尝试转换为bytes
-                img_base64 = image
+            img_base64 = self._preprocess_image_bytes(image, max_side=1024, quality=80)
 
                 # 构建消息
             messages = [{
@@ -625,8 +658,22 @@ PRIMARY GOAL: produce a compact, factual, non-decorative description optimized f
                 repeat_penalty=repeat_penalty,
             )
             ans = response["choices"][0]["message"]["content"]
+            # 显式释放临时对象，调用 GC
+            del img_base64, messages, response
+            gc.collect()
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
             return ans, 128
         except Exception as e:
+            gc.collect()
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
             return "**ERROR**: " + str(e), 0
 
     def chat(self, system, history, gen_conf, image=""):

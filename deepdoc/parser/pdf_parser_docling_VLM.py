@@ -100,6 +100,9 @@ class PdfParserVLM:
         self._vlm_cache = {}
         self._cache_size_limit = 1000
         
+        # 防止重复处理的图像哈希集合
+        self._processed_image_hashes = set()
+        
         # 临时文件管理
         self.temp_dir = None
 
@@ -173,7 +176,7 @@ class PdfParserVLM:
             finally:
                 self.temp_dir = None
 
-    def _describe_image_with_external_vlm(self, image_obj):
+    def _describe_image_with_external_vlm(self, image_obj, context):
         """
         使用外部VLM模型对图像进行语义描述
         
@@ -190,7 +193,7 @@ class PdfParserVLM:
         
         try:
             # 调用外部VLM模型的describe方法
-            vlm_result = self.vlm_mdl.describe(image_obj)
+            vlm_result = self.vlm_mdl.describe(image_obj, context)
             
             # 处理VLM返回值的不同格式
             if isinstance(vlm_result, tuple):
@@ -553,6 +556,14 @@ class PdfParserVLM:
                 # 对于PIL Image或其他类型，转换为字符串进行哈希
                 image_hash = hashlib.md5(str(image_data).encode()).hexdigest()
             
+            # 防止重复处理：检查图像是否已经处理过
+            if image_hash in self._processed_image_hashes:
+                logging.debug(f"跳过重复图像: {image_hash[:8]}...")
+                return
+            
+            # 标记为已处理
+            self._processed_image_hashes.add(image_hash)
+            
             # 检查缓存
             cached_description = self._get_cached_vlm_result(image_hash)
             if cached_description:
@@ -561,9 +572,23 @@ class PdfParserVLM:
             else:
                 # 使用VLM进行语义分析
                 start_time_vlm = time.time()
-                description = self._describe_image_with_external_vlm(image_data)
+                # context = sections[-1][0]
+                # 修复：安全获取上下文，只使用纯文本内容
+                context = ""
+                if sections:
+                    # 从后往前查找最近的文本内容（非VLM生成的描述）
+                    for section_text, _ in reversed(sections):
+                        section_text = section_text.strip()
+                        # 过滤掉可能是VLM生成的描述（通常包含特定关键词）
+                        if (section_text and len(section_text) > 5 and
+                            not any(keyword in section_text.lower() for keyword in 
+                                   ['image shows', 'chart depicts', 'figure contains', 'vlm解析', 'error', 'Page number'])):
+                            context = section_text[:500]  # 限制上下文长度
+                            break
+                
+                description = self._describe_image_with_external_vlm(image_data, context)
                 end_time_vlm = time.time()
-                print(f"574行：self._describe_image_with_external_vlm完成，耗时: {start_time_vlm - end_time_vlm:.2f}s, description:{description[:50]}")
+                print(f"VLM处理完成，耗时: {end_time_vlm - start_time_vlm:.2f}s, description:{description[:50]}")
                 # 缓存结果
                 if description and not description.startswith("VLM解析失败"):
                     self._cache_vlm_result(image_hash, description)
@@ -681,6 +706,9 @@ class PdfParserVLM:
         sections = []
         tbls = []
         
+        # 重置处理状态，防止跨文档的重复检查影响
+        self._processed_image_hashes.clear()
+        
         # 设置临时目录
         if need_image and self.enable_vlm:
             self._setup_temp_directory()
@@ -762,6 +790,54 @@ class PdfParserVLM:
     def remove_tag(self, txt):
         """保持兼容性的标签移除方法"""
         return re.sub(r"@@[\t0-9.-]+?##", "", txt)
+
+    @staticmethod
+    def total_page_number(filename, binary=None):
+        """
+        获取PDF总页数 - 使用轻量级方法
+        """
+        try:
+            # 优先使用PyPDF
+            try:
+                from pypdf import PdfReader
+
+                if binary:
+                    reader = PdfReader(BytesIO(binary))
+                else:
+                    reader = PdfReader(filename)
+
+                page_count = len(reader.pages)
+                logging.debug(f"PyPDF获取页数: {page_count}")
+                return page_count
+
+            except ImportError:
+                logging.debug("PyPDF未安装，尝试PyMuPDF")
+            except Exception as e:
+                logging.debug(f"PyPDF失败: {e}")
+
+            # 回退到PyMuPDF
+            try:
+                import fitz
+
+                if binary:
+                    doc = fitz.open("pdf", binary)
+                else:
+                    doc = fitz.open(filename)
+
+                page_count = doc.page_count
+                doc.close()
+                logging.debug(f"PyMuPDF获取页数: {page_count}")
+                return page_count
+
+            except Exception as e:
+                logging.debug(f"PyMuPDF失败: {e}")
+
+            return 1
+
+        except Exception as e:
+            logging.error(f"获取PDF页数失败: {str(e)}")
+            return 1
+
 
 class PlainParser(object):
     """简单PDF解析器 - 基于Docling的纯文本提取（无VLM）"""
