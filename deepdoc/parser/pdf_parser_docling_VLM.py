@@ -428,13 +428,13 @@ class PdfParserVLM:
             attr_value = item.get_image(doc)
             # 保存图片
             # if attr_value:
-                # self.save_pil_image(attr_value, out_path)
+            #     self.save_pil_image(attr_value)
             return attr_value
         except Exception as e:
             logging.error(f"从PictureItem提取图像失败: {e}")
             return None
             
-    def save_pil_image(self, img: Image.Image, out_path: Path=Path("/home/zzg/workspace/pycharm/RAG_Fin/figures/")):
+    def save_pil_image(self, img: Image.Image, out_path: Path=Path("./figures/")):
         out_path.mkdir(parents=True, exist_ok=True)
         out_path = out_path / f"{time.time()}.png"
         img.save(out_path)
