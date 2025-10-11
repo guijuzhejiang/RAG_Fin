@@ -14,7 +14,8 @@
 # from .pdf_parser_unstructured_VLM import PdfParserVLM as PdfParser, PlainParser
 from .pdf_parser_docling_VLM import PdfParserVLM as PdfParser, PlainParser
 from .docx_parser import RAGFlowDocxParser as DocxParser
-from .excel_parser import RAGFlowExcelParser as ExcelParser
+# from .excel_parser import RAGFlowExcelParser as ExcelParser
+from .excel_parser_docling_VLM import ExcelParserVLM as ExcelParser
 from .ppt_parser import RAGFlowPptParser as PptParser
 from .html_parser import RAGFlowHtmlParser as HtmlParser
 from .json_parser import RAGFlowJsonParser as JsonParser
